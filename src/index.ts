@@ -6,6 +6,7 @@ const main = async (): Promise<void> => {
     ollama: {
       host: "http://localhost:11434",
       model: "llama3.1",
+      embeddingModel: "nomic-embed-text",
     },
     redisUrl: "redis://localhost:6379",
   };

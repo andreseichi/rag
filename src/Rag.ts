@@ -11,6 +11,7 @@ import { documents } from "./data/documents";
 interface OllamaConfig {
   host: string;
   model: string;
+  embeddingModel: string;
 }
 
 interface Document {
@@ -22,11 +23,13 @@ interface Document {
 class RAG {
   private ollama: Ollama;
   private ollamaModel: string;
+  private ollamaEmbeddingModel: string;
   private redis: Redis;
 
   constructor(ollamaConfig: OllamaConfig, redisUrl: string) {
     this.ollama = new Ollama({ host: ollamaConfig.host });
     this.ollamaModel = ollamaConfig.model;
+    this.ollamaEmbeddingModel = ollamaConfig.embeddingModel;
     this.redis = createClient({
       url: redisUrl,
     });
@@ -72,7 +75,7 @@ class RAG {
         type: SchemaFieldTypes.VECTOR,
         ALGORITHM: VectorAlgorithms.HNSW,
         TYPE: "FLOAT32",
-        DIM: 4096, // 3072 - llama 3.2 / 4096 - llama3.1
+        DIM: 768, // 3072 - llama 3.2 / 4096 - llama3.1
         DISTANCE_METRIC: "COSINE",
       },
     } as RediSearchSchema;
@@ -86,7 +89,7 @@ class RAG {
   async generateEmbedding(text: string): Promise<number[]> {
     try {
       const response = await this.ollama.embeddings({
-        model: this.ollamaModel,
+        model: this.ollamaEmbeddingModel,
         prompt: text,
       });
 
@@ -145,7 +148,7 @@ class RAG {
       Pergunta:
       ${query}
 
-      Baseado no contexto acima, responda a pergunta de forma coerente.
+      Baseado no contexto acima, responda a pergunta de forma direta e coerente.
     `;
 
     const response = await this.ollama.chat({
