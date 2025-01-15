@@ -1,13 +1,12 @@
 import { Ollama } from "ollama";
-import { Marqo } from "./Marqo";
 import {
   createClient,
   RedisClientType as Redis,
   RediSearchSchema,
   SchemaFieldTypes,
-  SearchReply,
   VectorAlgorithms,
 } from "redis";
+import { documents } from "./data/documents";
 
 interface OllamaConfig {
   host: string;
@@ -24,7 +23,6 @@ class RAG {
   private ollama: Ollama;
   private ollamaModel: string;
   private redis: Redis;
-  private indexName = "documentos";
 
   constructor(ollamaConfig: OllamaConfig, redisUrl: string) {
     this.ollama = new Ollama({ host: ollamaConfig.host });
@@ -39,8 +37,14 @@ class RAG {
 
     try {
       await this.createIndex();
-    } catch (error) {
-      console.log("Index might already exist:", error);
+      await this.seed();
+    } catch (error: any) {
+      if (error.message === "Index already exists") {
+        console.log("Index exists already, skipped creation.");
+      } else {
+        console.error(error);
+        process.exit(1);
+      }
     }
   }
 
@@ -49,45 +53,34 @@ class RAG {
   }
 
   async init() {
-    await this.redis.connect();
-
-    try {
-      await this.createIndex();
-    } catch (error) {
-      console.log("Index might already exist:", error);
-    }
+    await this.connect();
   }
 
-  float32ArrayToBuffer(float32Array: number[]): Buffer {
+  private async seed() {
+    // salário, renda extra, despesas fixas, investimentos, fatura cartão, metas financeiras
+    await this.addDocuments(documents);
+  }
+
+  private float32ArrayToBuffer(float32Array: number[]): Buffer {
     return Buffer.from(new Float32Array(float32Array).buffer);
   }
 
   private async createIndex() {
     const schema = {
-      // content: { type: SchemaFieldTypes.TEXT },
-      v: {
+      content: { type: SchemaFieldTypes.TEXT },
+      embedding: {
         type: SchemaFieldTypes.VECTOR,
         ALGORITHM: VectorAlgorithms.HNSW,
         TYPE: "FLOAT32",
-        DIM: 2,
+        DIM: 4096, // 3072 - llama 3.2 / 4096 - llama3.1
         DISTANCE_METRIC: "COSINE",
       },
     } as RediSearchSchema;
 
-    try {
-      await this.redis.ft.create("idx:receitas", schema, {
-        ON: "HASH",
-        PREFIX: "noderedis:knn",
-      });
-    } catch (error: any) {
-      if (error.message === "Index already exists") {
-        console.log("Index exists already, skipped creation.");
-      } else {
-        // Something went wrong, perhaps RediSearch isn't installed...
-        console.error(error);
-        process.exit(1);
-      }
-    }
+    await this.redis.ft.create("idx:finance", schema, {
+      ON: "HASH",
+      PREFIX: "noderedis:knn",
+    });
   }
 
   async generateEmbedding(text: string): Promise<number[]> {
@@ -104,35 +97,68 @@ class RAG {
     }
   }
 
+  async addDocuments(documents: Omit<Document, "embedding">[]): Promise<void> {
+    for (const document of documents) {
+      await this.addDocument(document);
+    }
+  }
+
   async addDocument(document: Omit<Document, "embedding">): Promise<void> {
     const embedding = await this.generateEmbedding(document.content);
 
-    const response = await this.redis.hSet(
-      `noderedis:knn:${document.id}`,
-      {
-        // embedding: this.float32ArrayToBuffer(embedding),
-        v: this.float32ArrayToBuffer([0.1, 0.1]),
-      },
-    );
-
-    console.log("Response:", response);
+    await this.redis.hSet(`noderedis:knn:${document.id}`, {
+      embedding: this.float32ArrayToBuffer(embedding),
+      content: document.content,
+    });
   }
 
-  async search(query: string): Promise<SearchReply> {
+  async search(query: string): Promise<any> {
+    const embedding = await this.generateEmbedding(query);
+
     const results = await this.redis.ft.search(
-      "idx:receitas",
-      "*=>[KNN 4 @v $BLOB AS dist]",
+      "idx:finance",
+      "*=>[KNN 5 @embedding $embedding AS score]",
       {
         PARAMS: {
-          BLOB: this.float32ArrayToBuffer([0.1, 0.1]),
+          embedding: this.float32ArrayToBuffer(embedding),
         },
-        SORTBY: "dist",
+        SORTBY: "score",
         DIALECT: 2,
-        RETURN: ["dist"],
+        RETURN: ["content", "score"],
       },
     );
 
-    return results;
+    return results.documents;
+  }
+
+  async generateResponse(query: string): Promise<string> {
+    const similarDocuments = await this.search(query);
+
+    const context = similarDocuments.map(
+      (document: any) => document.value.content,
+    );
+
+    const enrichedPrompt = `
+      Contexto:
+      ${context.join("\n")}
+
+      Pergunta:
+      ${query}
+
+      Baseado no contexto acima, responda a pergunta de forma coerente.
+    `;
+
+    const response = await this.ollama.chat({
+      model: this.ollamaModel,
+      messages: [
+        {
+          role: "user",
+          content: enrichedPrompt,
+        },
+      ],
+    });
+
+    return response.message.content;
   }
 }
 
